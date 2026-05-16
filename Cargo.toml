@@ -1,0 +1,173 @@
+[workspace]
+
+# Centralised version pin for deps referenced from multiple scopes
+# (`[dependencies]`, `[target.'cfg(...)'.dependencies]`, `[dev-dependencies]`).
+# Each scope still picks its own feature set; cargo unions them at resolve
+# time so there is exactly one tokio crate in the build graph.
+[workspace.dependencies]
+tokio = { version = "1.52.3", default-features = false }
+
+[package]
+name = "uniwifi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Cross-platform Wi-Fi hardware abstraction layer for Windows, macOS, Android, and iOS."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yanburman/uniwifi"
+# NOTE: Clippy 1.94's cargo_common_metadata lint treats `readme = false`
+# as missing (cargo serializes it to null in `cargo metadata`). To stay
+# clippy-clean *and* avoid creating an actual README.md (per task brief),
+# we point at a placeholder filename. This only matters for `cargo package`,
+# which is not exercised by this crate.
+readme = "README.md"
+categories = ["network-programming", "os"]
+keywords = ["wifi", "wireless", "hal", "cross-platform"]
+
+[features]
+default = []
+mock = []
+tokio_rt = ["tokio/rt"]
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+all = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
+# zbus 5.x's transitive build-dep graph (wit-component / wasmparser via
+# zbus_macros, and getrandom 0.4 pulling in both wasip2 and wasip3 via
+# tempfile → uds_windows) contains version splits we can't unify from
+# this crate's Cargo.toml. The runtime graph on the Linux target is
+# unaffected — these are build/proc-macro-side dupes that don't ship in
+# the final binary. Documented exception, scoped to the one lint.
+multiple_crate_versions = { level = "allow", priority = 1 }
+
+[dependencies]
+async-trait = "0.1.89"
+bitflags = "2.11.1"
+thiserror = "2.0.18"
+secrecy = "0.10.3"
+# `sync`: oneshot / Mutex used by backends to bridge OS callbacks to async.
+# `time`: tokio::time::sleep used in the internal pre-flight scan loop.
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Objective-C runtime + NSError -> Result sugar.
+objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
+# Foundation types (NSString, NSData, NSArray, NSError).
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSString",
+    "NSData",
+    "NSArray",
+    "NSError",
+    "NSSet",
+] }
+# CoreWLAN bindings. CoreWLANUtil unlocks CWKeychain* C functions; CoreWLANTypes
+# unlocks the CWKeychainDomain / CWErr / CWSecurity enums.
+objc2-core-wlan = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CWWiFiClient",
+    "CWInterface",
+    "CWNetwork",
+    "CWChannel",
+    "CWConfiguration",
+    "CWNetworkProfile",
+    "CoreWLANTypes",
+    "CoreWLANUtil",
+] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["sync", "macros", "rt", "rt-multi-thread", "test-util", "time"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_NetworkManagement_WiFi",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Foundation",
+    "Win32_System_Com",
+] }
+# On Windows the backend offloads synchronous WLAN calls via
+# `tokio::task::spawn_blocking`, which requires the `rt`/`rt-multi-thread`
+# features. Cargo unions these with the base `["sync","time"]` set, so
+# non-Windows builds stay minimal while Windows gets the full runtime.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+# JNI bindings.
+jni = { version = "0.22.4", default-features = false }
+
+# Provides the JavaVM and Context pointers initialized by the host app
+# (or ndk-glue / android-activity, if the consumer uses one).
+ndk-context = "0.1.1"
+
+# Provides a Java dynamic-proxy-backed BroadcastReceiver implementation
+# usable from pure Rust — saves us shipping a Kotlin/Java helper class
+# alongside the crate.
+jni-min-helper = "0.4.1"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# Objective-C runtime + NSError -> Result sugar. Same tight surface as macOS.
+objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
+
+# Foundation types (NSString, NSError, NSArray). `block2` is enabled
+# explicitly because it gates `RcBlock` / `Block` types used to bridge Rust
+# closures into the `void(^)(NSError *)` / `void(^)(NSArray<NSString *> *)`
+# completion handlers consumed by the Network Extension APIs below. Although
+# `objc2-network-extension` enables its own `block2` feature by default, it
+# pulls `objc2-foundation` in with `default-features = false` and an explicit
+# class list that does NOT include `"block2"`, so the foundation-side block
+# bridging would otherwise be off. Listing it here is therefore required (not
+# merely defensive).
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSString",
+    "NSError",
+    "NSArray",
+    "block2",
+] }
+
+# Network Extension framework. Unlike the other objc2-* crates, this one
+# does not feature-gate individual classes — the default feature set already
+# exposes `NEHotspotConfiguration` / `NEHotspotConfigurationManager`, and its
+# defaults also turn on `block2` + `objc2-security` which are required for
+# `applyConfiguration:completionHandler:`. We therefore intentionally KEEP
+# `default-features = true` for this single crate.
+objc2-network-extension = { version = "0.3.2", default-features = true }
+
+# UIKit, used solely to inspect `UIApplication.sharedApplication.applicationState`
+# from the foreground check. Tight feature surface — only the two classes we
+# actually touch — mirroring the macOS objc2-core-wlan discipline.
+objc2-ui-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "UIApplication",
+    "UIResponder",
+] }
+
+# Block bridging — wraps Rust closures in `RcBlock` so they can be passed where
+# Objective-C expects `void(^)(NSError *)` or `void(^)(NSArray<NSString *> *)`.
+# Leaf dep with no classes to gate, so default features are fine.
+block2 = "0.6.2"
+
+# Grand Central Dispatch bindings, used to hop the
+# `NEHotspotConfigurationManager` / `UIApplication.applicationState` calls
+# onto the main queue when the caller is on a tokio worker thread. Already
+# present transitively via `objc2-network-extension`; declared explicitly so
+# we can name `dispatch2::DispatchQueue::main()`.
+dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Pure-Rust async D-Bus client. The `tokio` feature switches zbus's I/O
+# loop to spawn its background tasks via `tokio::spawn` instead of
+# async-io / async-executor; the host app is already a tokio user, so
+# this avoids dragging in a second runtime.
+zbus = { version = "5.15.0", default-features = false, features = ["tokio", "blocking-api"] }
+# zbus's tokio integration uses `tokio::spawn`, which requires the `rt`
+# feature. Cargo unions feature sets, so non-Linux builds stay minimal
+# while Linux gets the runtime piece.
+tokio = { workspace = true, features = ["rt"] }
+# `state_wait::wait_for_active_connection` calls `StreamExt::next()` on the
+# `ActiveConnection.StateChanged` signal stream. zbus pulls `futures-util`
+# transitively, but since we use the trait directly we declare it as an
+# explicit dep (`default-features = false` keeps it a leaf, no executor).
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
