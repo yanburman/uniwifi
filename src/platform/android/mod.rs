@@ -77,6 +77,8 @@ mod status_codes;
 mod suggestion;
 #[cfg(target_os = "android")]
 mod wifi_manager;
+#[cfg(target_os = "android")]
+mod wifi_specifier;
 
 mod backend;
 // Re-export only on android — the host-tests cfg-relaxation compiles

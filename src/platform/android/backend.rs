@@ -162,34 +162,18 @@ impl Backend for AndroidBackend {
         let lock = self.adapter_lock(adapter);
         let _guard = lock.lock().await;
 
-        // Pre-flight scan. `Skipped` (no permission, no scan API
-        // available) is treated as best-effort and we proceed; that
-        // matches the Linux/Windows policy. `NotVisible` promotes to
-        // `SsidNotInRange` so the caller sees the documented typed
-        // error rather than a downstream `Timeout`.
-        let scanner = super::scan_receiver::AndroidScanner;
-        let outcome = crate::preflight::wait_until_ssid_visible(
-            &scanner,
-            ssid,
-            // Cap pre-flight at 1/3 of the overall timeout so the
-            // connect path itself still has budget.
-            options.effective_timeout() / 3,
-        )
-        .await;
-        if outcome == crate::preflight::ScanOutcome::NotVisible {
-            return Err(Error::SsidNotInRange);
-        }
-
+        // Connect on-demand via a Wi-Fi network specifier rather than a
+        // suggestion: a suggestion is opportunistic and the OS will not drop an
+        // active internet-bearing network for it, whereas a network *request*
+        // with a specifier brings the target AP up as an app-scoped network
+        // (after a one-time user-approval dialog) and binds this process to it.
         let ssid_owned = ssid.clone();
         let creds_owned = credentials.clone();
-        let opts_owned = options.clone();
-        let target_for_cache = ssid.clone();
-
-        let suggestion_global =
-            jni_blocking(move || blocking_connect(&ssid_owned, &creds_owned, &opts_owned)).await?;
-
-        self.cache_suggestion(target_for_cache, suggestion_global);
-        Ok(())
+        let timeout = options.effective_timeout();
+        jni_blocking(move || {
+            super::wifi_specifier::connect_via_specifier(&ssid_owned, &creds_owned, timeout)
+        })
+        .await
     }
 
     async fn connect_with_stored_credentials(

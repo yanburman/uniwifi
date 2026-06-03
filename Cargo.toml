@@ -97,6 +97,10 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread"] }
 # JNI bindings.
 jni = { version = "0.22.4", default-features = false }
 
+# Logging facade for connect diagnostics (the host app installs a logger,
+# e.g. android_logger). Already in the tree via jni-min-helper.
+log = { version = "0.4", default-features = false }
+
 # Provides the JavaVM and Context pointers initialized by the host app
 # (or ndk-glue / android-activity, if the consumer uses one).
 ndk-context = "0.1.1"

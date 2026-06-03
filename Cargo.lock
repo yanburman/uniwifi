@@ -934,6 +934,7 @@ dependencies = [
  "futures-util",
  "jni",
  "jni-min-helper",
+ "log",
  "ndk-context",
  "objc2",
  "objc2-core-wlan",
