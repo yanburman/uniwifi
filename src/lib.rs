@@ -2,6 +2,7 @@
 
 mod api;
 mod backend;
+mod connection;
 mod error;
 mod platform;
 mod preflight;
@@ -9,6 +10,7 @@ mod scan_rollup;
 mod types;
 
 pub use api::{UniWifi, WifiAdapter};
+pub use connection::WifiConnection;
 pub use error::{BoxedOsError, Error};
 pub use types::{
     AdapterId, Band, ConnectOptions, Credentials, ScanOptions, SecurityFlags, Ssid, SsidError,
