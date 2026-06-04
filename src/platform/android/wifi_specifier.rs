@@ -81,7 +81,9 @@ pub fn connect_via_specifier(
 ) -> Result<WifiConnection, Error> {
     let ssid_str = ssid
         .as_str()
-        .ok_or(Error::Unsupported("non-UTF8 SSIDs not supported on Android"))?
+        .ok_or(Error::Unsupported(
+            "non-UTF8 SSIDs not supported on Android",
+        ))?
         .to_owned();
     let password = match credentials {
         Credentials::Password(secret) => Some(secret.expose_secret().to_owned()),
@@ -92,16 +94,15 @@ pub fn connect_via_specifier(
     let before = jni_with_env(network_handles).map_err(|e| Error::Os(boxed(e)))?;
 
     // Issue the request with a live (no-op) NetworkCallback; hold its global ref.
-    let callback =
-        jni_with_env(|env| request_network(env, &ssid_str, password.as_deref()))
-            .map_err(|e| Error::Os(boxed(e)))?;
+    let callback = jni_with_env(|env| request_network(env, &ssid_str, password.as_deref()))
+        .map_err(|e| Error::Os(boxed(e)))?;
 
     // Poll for the newly-appeared Wi-Fi network and bind to it. The held
     // callback keeps the request alive throughout, so there is no teardown race.
     let deadline = Instant::now() + timeout;
     loop {
-        let bound = jni_with_env(|env| try_bind_new_wifi(env, &before))
-            .map_err(|e| Error::Os(boxed(e)))?;
+        let bound =
+            jni_with_env(|env| try_bind_new_wifi(env, &before)).map_err(|e| Error::Os(boxed(e)))?;
         if bound {
             return Ok(WifiConnection::new(SpecifierGuard { callback }));
         }
@@ -189,7 +190,9 @@ fn request_network(
     env.call_method(
         &cm,
         jni_str!("requestNetwork"),
-        jni_sig!("(Landroid/net/NetworkRequest;Landroid/net/ConnectivityManager$NetworkCallback;)V"),
+        jni_sig!(
+            "(Landroid/net/NetworkRequest;Landroid/net/ConnectivityManager$NetworkCallback;)V"
+        ),
         &[JValue::Object(&request), JValue::Object(&callback)],
     )?;
 
@@ -199,10 +202,7 @@ fn request_network(
 
 /// Finds a `TRANSPORT_WIFI` network whose handle was not present in `before` and
 /// binds the process to it. Returns `true` once bound.
-fn try_bind_new_wifi(
-    env: &mut Env<'_>,
-    before: &HashSet<i64>,
-) -> Result<bool, jni::errors::Error> {
+fn try_bind_new_wifi(env: &mut Env<'_>, before: &HashSet<i64>) -> Result<bool, jni::errors::Error> {
     let cm = connectivity_manager(env)?;
     let arr_obj = env
         .call_method(

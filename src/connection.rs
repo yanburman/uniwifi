@@ -7,6 +7,7 @@ pub struct WifiConnection {
 
 impl WifiConnection {
     /// Wrap a platform guard whose own `Drop` performs the teardown.
+    #[cfg(target_os = "android")]
     pub(crate) fn new<G: Send + Sync + 'static>(guard: G) -> Self {
         Self {
             _inner: Box::new(guard),
