@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use secrecy::ExposeSecret;
 
 use crate::backend::{AdapterInfo, Backend};
+use crate::connection::WifiConnection;
 use crate::error::Error;
 use crate::types::{
     AdapterId, ConnectOptions, Credentials, ScanOptions, SecurityFlags, Ssid, VisibleNetwork,
@@ -189,7 +190,7 @@ impl Backend for MockBackend {
         ssid: &Ssid,
         credentials: &Credentials,
         _options: &ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         // Resolve everything we need up front, then drop the guard before
         // returning so we never hold the lock across the function boundary.
         let mut inner = self.state.inner.lock().unwrap();
@@ -219,7 +220,7 @@ impl Backend for MockBackend {
             .insert((adapter.clone(), ssid.clone()), supplied);
         inner.connected.insert(adapter.clone(), ssid.clone());
         drop(inner);
-        Ok(())
+        Ok(WifiConnection::inert())
     }
 
     async fn connect_with_stored_credentials(
@@ -227,7 +228,7 @@ impl Backend for MockBackend {
         adapter: &AdapterId,
         ssid: &Ssid,
         _options: &ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         let mut inner = self.state.inner.lock().unwrap();
         let stored = inner
             .profiles
@@ -246,7 +247,7 @@ impl Backend for MockBackend {
             Some(t) if t == pw => {
                 inner.connected.insert(adapter.clone(), ssid.clone());
                 drop(inner);
-                Ok(())
+                Ok(WifiConnection::inert())
             }
             Some(_) => {
                 drop(inner);

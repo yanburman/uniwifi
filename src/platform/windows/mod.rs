@@ -26,6 +26,7 @@ use handle::WlanClient;
 use notifications::Dispatcher;
 
 use crate::backend::{AdapterInfo, Backend};
+use crate::connection::WifiConnection;
 use crate::error::Error;
 use crate::types::{AdapterId, ConnectOptions, Credentials, ScanOptions, Ssid, VisibleNetwork};
 
@@ -102,7 +103,7 @@ impl Backend for WindowsBackend {
         ssid: &Ssid,
         credentials: &Credentials,
         options: &ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         let interface = util::adapter_id_to_guid(adapter)?;
         let lock = self.adapter_lock(interface);
         let _g = lock.lock().await;
@@ -133,6 +134,7 @@ impl Backend for WindowsBackend {
             deadline,
         )
         .await
+        .map(|()| WifiConnection::inert())
     }
 
     async fn connect_with_stored_credentials(
@@ -140,7 +142,7 @@ impl Backend for WindowsBackend {
         adapter: &AdapterId,
         ssid: &Ssid,
         options: &ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         let interface = util::adapter_id_to_guid(adapter)?;
         let lock = self.adapter_lock(interface);
         let _g = lock.lock().await;
@@ -152,6 +154,7 @@ impl Backend for WindowsBackend {
             options.effective_timeout(),
         )
         .await
+        .map(|()| WifiConnection::inert())
     }
 
     async fn disconnect(&self, adapter: &AdapterId, ssid: &Ssid) -> Result<(), Error> {

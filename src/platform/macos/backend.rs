@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use crate::backend::{AdapterInfo, Backend};
+use crate::connection::WifiConnection;
 use crate::error::Error;
 use crate::types::{AdapterId, ConnectOptions, Credentials, ScanOptions, Ssid, VisibleNetwork};
 
@@ -106,7 +107,7 @@ impl Backend for MacosBackend {
         ssid: &Ssid,
         credentials: &Credentials,
         options: &ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         let lock = self.op_lock_for(adapter);
         let _guard = lock.lock().await;
         super::connect::connect(
@@ -117,6 +118,7 @@ impl Backend for MacosBackend {
             options,
         )
         .await
+        .map(|()| WifiConnection::inert())
     }
 
     async fn connect_with_stored_credentials(
@@ -124,7 +126,7 @@ impl Backend for MacosBackend {
         adapter: &AdapterId,
         ssid: &Ssid,
         options: &ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         let lock = self.op_lock_for(adapter);
         let _guard = lock.lock().await;
         super::connect::connect_with_stored(
@@ -134,6 +136,7 @@ impl Backend for MacosBackend {
             options,
         )
         .await
+        .map(|()| WifiConnection::inert())
     }
 
     async fn disconnect(&self, adapter: &AdapterId, ssid: &Ssid) -> Result<(), Error> {

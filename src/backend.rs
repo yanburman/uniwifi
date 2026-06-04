@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::connection::WifiConnection;
 use crate::error::Error;
 use crate::types::{AdapterId, ConnectOptions, Credentials, ScanOptions, Ssid, VisibleNetwork};
 
@@ -24,7 +25,7 @@ pub trait Backend: Send + Sync {
         ssid: &Ssid,
         credentials: &Credentials,
         options: &ConnectOptions,
-    ) -> Result<(), Error>;
+    ) -> Result<WifiConnection, Error>;
 
     /// Connect using credentials already on the system (per-platform semantics).
     async fn connect_with_stored_credentials(
@@ -32,7 +33,7 @@ pub trait Backend: Send + Sync {
         adapter: &AdapterId,
         ssid: &Ssid,
         options: &ConnectOptions,
-    ) -> Result<(), Error>;
+    ) -> Result<WifiConnection, Error>;
 
     /// Disconnect from the given SSID.
     async fn disconnect(&self, adapter: &AdapterId, ssid: &Ssid) -> Result<(), Error>;

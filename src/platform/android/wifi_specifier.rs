@@ -1,36 +1,33 @@
 //! On-demand connect to a specific AP via `WifiNetworkSpecifier` +
 //! `ConnectivityManager.requestNetwork`.
 //!
-//! Unlike the `WifiNetworkSuggestion` path (see `suggestion.rs`), this connects
-//! to the target AP *on demand* even while the device is already associated to
-//! another (internet-bearing) network — the OS will not drop an internet
-//! network for an opportunistic suggestion, but a network *request* with a
-//! specifier brings the AP up as an app-scoped network. The system shows a
-//! one-time "Connect to <ssid>?" dialog the user must approve.
+//! A `WifiNetworkSpecifier` network stays up only while its `NetworkRequest` is
+//! held by a live, registered `NetworkCallback`. We issue the
+//! `requestNetwork(NetworkRequest, NetworkCallback)` overload with a concrete
+//! no-op `NetworkCallback` (instantiable from pure JNI — no Java subclass / dex)
+//! and keep it registered for as long as the returned [`SpecifierGuard`] lives.
+//! Dropping the guard `unregisterNetworkCallback`s and unbinds the process — the
+//! framework then disconnects the AP. The callback-free `PendingIntent` overload
+//! must NOT be used: the framework reaps it ~5 s after connect
+//! (`ConnectivityService: ... releasing NetworkRequest ... (release request)` →
+//! `no live requests ... disconnecting`).
 //!
-//! We issue the callback-free `requestNetwork(NetworkRequest, PendingIntent)`
-//! overload and read the satisfying `Network` from the operation broadcast's
-//! `EXTRA_NETWORK`, then **bind the process to it inside `onReceive`** — i.e.
-//! the instant the network is available. Binding immediately matters: a
-//! specifier network that nothing holds/uses is torn down by the framework a
-//! few seconds after it connects, so the SSID-polling approach (which can't see
-//! the SSID anyway — `NetworkCapabilities` redacts it) loses the race. The
-//! broadcast receiver must be registered `RECEIVER_NOT_EXPORTED` (the system
-//! delivers our own `PendingIntent` within the app) because `targetSdk` 34
-//! rejects the flagless `registerReceiver` for non-system actions.
-//!
-//! `NetworkCallback` (the textbook variant) is avoided because it's an abstract
-//! Java class that can't be created from pure JNI without shipping a dex.
+//! We don't override `onAvailable` (that would need a dex), so the `Network` to
+//! bind is found by snapshotting the `Network` handles from `getAllNetworks()`
+//! *before* the request, then binding the newly-appeared `TRANSPORT_WIFI`
+//! network. The held callback keeps the network alive, so there's no teardown
+//! race while we wait for user approval + L3 setup.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use jni::objects::{JObject, JString, JValue};
+use jni::objects::{JObject, JObjectArray, JString, JValue};
+use jni::refs::Global;
 use jni::{Env, jni_sig, jni_str};
-use jni_min_helper::{BroadcastReceiver, android_context, jni_with_env};
+use jni_min_helper::{android_context, jni_with_env};
 use secrecy::ExposeSecret;
 
+use crate::connection::WifiConnection;
 use crate::error::Error;
 use crate::types::{Credentials, Ssid};
 
@@ -38,124 +35,125 @@ use super::jni_helpers::boxed;
 
 /// `NetworkCapabilities.TRANSPORT_WIFI`.
 const TRANSPORT_WIFI: i32 = 1;
-/// `PendingIntent.FLAG_UPDATE_CURRENT | FLAG_MUTABLE` — mutable is required on
-/// API 31+ for `requestNetwork` to accept the operation intent.
-const PENDING_INTENT_FLAGS: i32 = 0x0800_0000 | 0x0200_0000;
-/// `Context.RECEIVER_NOT_EXPORTED` (API 33+).
-const RECEIVER_NOT_EXPORTED: i32 = 4;
-/// Private broadcast action carrying the `requestNetwork` result.
-const RESULT_ACTION: &str = "uniwifi.WIFI_SPECIFIER_REQUEST";
-/// `ConnectivityManager.EXTRA_NETWORK`.
-const EXTRA_NETWORK: &str = "android.net.extra.NETWORK";
+
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// RAII guard holding the registered no-op `NetworkCallback`. While it lives the
+/// specifier request is held and the camera network stays up. `Drop` releases
+/// the request and unbinds the process.
+struct SpecifierGuard {
+    callback: Global<JObject<'static>>,
+}
+
+impl Drop for SpecifierGuard {
+    fn drop(&mut self) {
+        let callback = self.callback.as_obj();
+        let _ = jni_with_env(|env| -> Result<(), jni::errors::Error> {
+            let cm = connectivity_manager(env)?;
+            env.call_method(
+                &cm,
+                jni_str!("unregisterNetworkCallback"),
+                jni_sig!("(Landroid/net/ConnectivityManager$NetworkCallback;)V"),
+                &[JValue::Object(callback)],
+            )?;
+            // Clear the process binding so later sockets use the default network.
+            env.call_method(
+                &cm,
+                jni_str!("bindProcessToNetwork"),
+                jni_sig!("(Landroid/net/Network;)Z"),
+                &[JValue::Object(&JObject::null())],
+            )?;
+            log::info!("wifi_specifier: connection guard dropped (callback unregistered, unbound)");
+            Ok(())
+        });
+    }
+}
 
 /// Connects to `ssid`/`credentials` via a Wi-Fi network specifier, blocking
 /// until the AP network is up (and this process bound to it) or `timeout`
-/// elapses. Must be run off the main thread — it sleeps while polling, and both
-/// the approval dialog and the result broadcast are driven on the main looper.
+/// elapses. Must be run off the main thread — it sleeps while polling, and the
+/// approval dialog is driven on the main looper. Returns a [`WifiConnection`]
+/// whose `Drop` disconnects.
 pub fn connect_via_specifier(
     ssid: &Ssid,
     credentials: &Credentials,
     timeout: Duration,
-) -> Result<(), Error> {
-    // Validate UTF-8 / extract the passphrase up front so the JNI helpers only
-    // deal with native `jni` errors.
+) -> Result<WifiConnection, Error> {
     let ssid_str = ssid
         .as_str()
-        .ok_or(Error::Unsupported(
-            "non-UTF8 SSIDs not supported on Android",
-        ))?
+        .ok_or(Error::Unsupported("non-UTF8 SSIDs not supported on Android"))?
         .to_owned();
     let password = match credentials {
         Credentials::Password(secret) => Some(secret.expose_secret().to_owned()),
         Credentials::Open => None,
     };
 
-    // Set true by the receiver once it has bound the process to the network.
-    let bound = Arc::new(AtomicBool::new(false));
-    let bound_for_rx = Arc::clone(&bound);
+    // Snapshot existing Network handles so we can spot the one our request brings up.
+    let before = jni_with_env(network_handles).map_err(|e| Error::Os(boxed(e)))?;
 
-    // Register before requesting so the result broadcast can't be missed.
-    let receiver = BroadcastReceiver::build(move |env, _ctx, intent| {
-        let name = JString::new(env, EXTRA_NETWORK)?;
-        let net_cls = env.find_class(jni_str!("android/net/Network"))?;
-        let network = intent.get_parcelable_extra(env, &name, &net_cls)?;
-        if network.is_null() {
-            log::warn!("wifi_specifier: result broadcast had no EXTRA_NETWORK");
-            return Ok(());
-        }
-        // Bind here, on the main looper, the moment the network is available —
-        // before the framework tears down an unheld specifier network.
-        let cm = connectivity_manager(env)?;
-        let ok = env
-            .call_method(
-                &cm,
-                jni_str!("bindProcessToNetwork"),
-                jni_sig!((android.net.Network) -> boolean),
-                &[JValue::Object(&network)],
-            )?
-            .z()?;
-        log::info!("wifi_specifier: bound process to specifier network (ok={ok})");
-        bound_for_rx.store(ok, Ordering::SeqCst);
-        Ok(())
-    })
-    .map_err(|e| Error::Os(boxed(e)))?;
-    register_not_exported(&receiver, RESULT_ACTION).map_err(|e| Error::Os(boxed(e)))?;
+    // Issue the request with a live (no-op) NetworkCallback; hold its global ref.
+    let callback =
+        jni_with_env(|env| request_network(env, &ssid_str, password.as_deref()))
+            .map_err(|e| Error::Os(boxed(e)))?;
 
-    jni_with_env(|env| -> Result<(), jni::errors::Error> {
-        request_network(env, &ssid_str, password.as_deref())
-    })
-    .map_err(|e| Error::Os(boxed(e)))?;
-
+    // Poll for the newly-appeared Wi-Fi network and bind to it. The held
+    // callback keeps the request alive throughout, so there is no teardown race.
     let deadline = Instant::now() + timeout;
-    while !bound.load(Ordering::SeqCst) {
+    loop {
+        let bound = jni_with_env(|env| try_bind_new_wifi(env, &before))
+            .map_err(|e| Error::Os(boxed(e)))?;
+        if bound {
+            return Ok(WifiConnection::new(SpecifierGuard { callback }));
+        }
         if Instant::now() >= deadline {
-            drop(receiver);
+            // Dropping `callback` here would unregister via Global's own drop;
+            // wrap in a guard so the request is released cleanly on timeout too.
+            drop(SpecifierGuard { callback });
             return Err(Error::Timeout(timeout));
         }
         std::thread::sleep(POLL_INTERVAL);
     }
-    drop(receiver);
-    Ok(())
 }
 
-/// Registers `receiver` for `action` with `RECEIVER_NOT_EXPORTED`. The flagless
-/// 2-arg `registerReceiver` (`jni_min_helper`'s `register_for_action`) throws on
-/// `targetSdk` 34 for a non-system action, so we use the 3-arg form (API 33+).
-fn register_not_exported(receiver: &BroadcastReceiver, action: &str) -> Result<(), jni::errors::Error> {
-    jni_with_env(|env| {
-        let action_j = JString::new(env, action)?;
-        let filter = env.new_object(
-            jni_str!("android/content/IntentFilter"),
-            jni_sig!((java.lang.String) -> void),
-            &[JValue::Object(&action_j)],
-        )?;
-        env.call_method(
-            android_context(),
-            jni_str!("registerReceiver"),
-            jni_sig!(
-                (android.content.BroadcastReceiver, android.content.IntentFilter, int)
-                    -> android.content.Intent
-            ),
-            &[
-                JValue::Object(receiver.as_ref()),
-                JValue::Object(&filter),
-                JValue::Int(RECEIVER_NOT_EXPORTED),
-            ],
-        )?;
-        Ok(())
-    })
+/// Collects the `getNetworkHandle()` of every current `Network`.
+fn network_handles(env: &mut Env<'_>) -> Result<HashSet<i64>, jni::errors::Error> {
+    let mut set = HashSet::new();
+    let cm = connectivity_manager(env)?;
+    let arr_obj = env
+        .call_method(
+            &cm,
+            jni_str!("getAllNetworks"),
+            jni_sig!("()[Landroid/net/Network;"),
+            &[],
+        )?
+        .l()?;
+    if arr_obj.is_null() {
+        return Ok(set);
+    }
+    let arr = JObjectArray::<JObject>::cast_local(env, arr_obj)?;
+    let len = arr.len(env)?;
+    for i in 0..len {
+        let net = arr.get_element(env, i)?;
+        if net.is_null() {
+            continue;
+        }
+        let handle = env
+            .call_method(&net, jni_str!("getNetworkHandle"), jni_sig!("()J"), &[])?
+            .j()?;
+        set.insert(handle);
+    }
+    Ok(set)
 }
 
-/// Builds the specifier + request and calls `requestNetwork(request, pendingIntent)`.
+/// Builds the specifier + request and calls `requestNetwork(request, callback)`,
+/// returning the callback's global ref (which holds the request).
 fn request_network(
     env: &mut Env<'_>,
     ssid: &str,
     password: Option<&str>,
-) -> Result<(), jni::errors::Error> {
+) -> Result<Global<JObject<'static>>, jni::errors::Error> {
     let specifier = build_specifier(env, ssid, password)?;
 
-    // NetworkRequest.Builder().addTransportType(WIFI).setNetworkSpecifier(spec).build()
     let req_builder = env.new_object(
         jni_str!("android/net/NetworkRequest$Builder"),
         jni_sig!(() -> void),
@@ -182,15 +180,90 @@ fn request_network(
         )?
         .l()?;
 
-    let pending_intent = build_pending_intent(env)?;
+    let callback = env.new_object(
+        jni_str!("android/net/ConnectivityManager$NetworkCallback"),
+        jni_sig!("()V"),
+        &[],
+    )?;
     let cm = connectivity_manager(env)?;
     env.call_method(
         &cm,
         jni_str!("requestNetwork"),
-        jni_sig!((android.net.NetworkRequest, android.app.PendingIntent) -> void),
-        &[JValue::Object(&request), JValue::Object(&pending_intent)],
+        jni_sig!("(Landroid/net/NetworkRequest;Landroid/net/ConnectivityManager$NetworkCallback;)V"),
+        &[JValue::Object(&request), JValue::Object(&callback)],
     )?;
-    Ok(())
+
+    log::info!("wifi_specifier: requestNetwork(NetworkCallback) issued, request held");
+    env.new_global_ref(&callback)
+}
+
+/// Finds a `TRANSPORT_WIFI` network whose handle was not present in `before` and
+/// binds the process to it. Returns `true` once bound.
+fn try_bind_new_wifi(
+    env: &mut Env<'_>,
+    before: &HashSet<i64>,
+) -> Result<bool, jni::errors::Error> {
+    let cm = connectivity_manager(env)?;
+    let arr_obj = env
+        .call_method(
+            &cm,
+            jni_str!("getAllNetworks"),
+            jni_sig!("()[Landroid/net/Network;"),
+            &[],
+        )?
+        .l()?;
+    if arr_obj.is_null() {
+        return Ok(false);
+    }
+    let arr = JObjectArray::<JObject>::cast_local(env, arr_obj)?;
+    let len = arr.len(env)?;
+    for i in 0..len {
+        let net = arr.get_element(env, i)?;
+        if net.is_null() {
+            continue;
+        }
+        let handle = env
+            .call_method(&net, jni_str!("getNetworkHandle"), jni_sig!("()J"), &[])?
+            .j()?;
+        if before.contains(&handle) {
+            continue;
+        }
+        let caps = env
+            .call_method(
+                &cm,
+                jni_str!("getNetworkCapabilities"),
+                jni_sig!("(Landroid/net/Network;)Landroid/net/NetworkCapabilities;"),
+                &[JValue::Object(&net)],
+            )?
+            .l()?;
+        if caps.is_null() {
+            continue;
+        }
+        let has_wifi = env
+            .call_method(
+                &caps,
+                jni_str!("hasTransport"),
+                jni_sig!("(I)Z"),
+                &[JValue::Int(TRANSPORT_WIFI)],
+            )?
+            .z()?;
+        if !has_wifi {
+            continue;
+        }
+        let ok = env
+            .call_method(
+                &cm,
+                jni_str!("bindProcessToNetwork"),
+                jni_sig!("(Landroid/net/Network;)Z"),
+                &[JValue::Object(&net)],
+            )?
+            .z()?;
+        log::info!("wifi_specifier: bound process to new wifi network (ok={ok})");
+        if ok {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// `new WifiNetworkSpecifier.Builder().setSsid(..).setWpa2Passphrase(..).build()`.
@@ -225,47 +298,6 @@ fn build_specifier<'a>(
         jni_str!("build"),
         jni_sig!(() -> android.net.wifi.WifiNetworkSpecifier),
         &[],
-    )?
-    .l()
-}
-
-/// `PendingIntent.getBroadcast(ctx, 0, new Intent(ACTION).setPackage(pkg), flags)`.
-fn build_pending_intent<'a>(env: &mut Env<'a>) -> Result<JObject<'a>, jni::errors::Error> {
-    let ctx = android_context();
-    let action = JString::new(env, RESULT_ACTION)?;
-    let intent = env.new_object(
-        jni_str!("android/content/Intent"),
-        jni_sig!((java.lang.String) -> void),
-        &[JValue::Object(&action)],
-    )?;
-    let pkg = env
-        .call_method(
-            ctx,
-            jni_str!("getPackageName"),
-            jni_sig!(() -> java.lang.String),
-            &[],
-        )?
-        .l()?;
-    env.call_method(
-        &intent,
-        jni_str!("setPackage"),
-        jni_sig!((java.lang.String) -> android.content.Intent),
-        &[JValue::Object(&pkg)],
-    )?;
-    let pi_cls = env.find_class(jni_str!("android/app/PendingIntent"))?;
-    env.call_static_method(
-        &pi_cls,
-        jni_str!("getBroadcast"),
-        jni_sig!(
-            (android.content.Context, int, android.content.Intent, int)
-                -> android.app.PendingIntent
-        ),
-        &[
-            JValue::Object(ctx),
-            JValue::Int(0),
-            JValue::Object(&intent),
-            JValue::Int(PENDING_INTENT_FLAGS),
-        ],
     )?
     .l()
 }

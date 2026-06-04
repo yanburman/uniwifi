@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex, OnceCell};
 
 use crate::backend::{AdapterInfo, Backend};
+use crate::connection::WifiConnection;
 use crate::error::{BoxedOsError, Error};
 use crate::types::{AdapterId, ConnectOptions, Credentials, ScanOptions, Ssid, VisibleNetwork};
 
@@ -115,11 +116,13 @@ impl Backend for LinuxBackend {
         ssid: &Ssid,
         credentials: &Credentials,
         options: &ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         let handles = self.proxies().await?;
         let lock = self.adapter_lock(adapter).await;
         let _guard = lock.lock().await;
-        super::connect::connect_with_credentials(handles, adapter, ssid, credentials, options).await
+        super::connect::connect_with_credentials(handles, adapter, ssid, credentials, options)
+            .await
+            .map(|()| WifiConnection::inert())
     }
 
     async fn connect_with_stored_credentials(
@@ -127,11 +130,13 @@ impl Backend for LinuxBackend {
         adapter: &AdapterId,
         ssid: &Ssid,
         options: &ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         let handles = self.proxies().await?;
         let lock = self.adapter_lock(adapter).await;
         let _guard = lock.lock().await;
-        super::connect::connect_with_stored(handles, adapter, ssid, options).await
+        super::connect::connect_with_stored(handles, adapter, ssid, options)
+            .await
+            .map(|()| WifiConnection::inert())
     }
 
     async fn disconnect(&self, adapter: &AdapterId, ssid: &Ssid) -> Result<(), Error> {

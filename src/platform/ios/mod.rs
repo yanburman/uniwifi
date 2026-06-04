@@ -49,6 +49,7 @@ mod ios_backend {
     use tokio::sync::Mutex;
 
     use crate::backend::{AdapterInfo, Backend};
+    use crate::connection::WifiConnection;
     use crate::error::Error;
     use crate::types::{AdapterId, ConnectOptions, Credentials, ScanOptions, Ssid, VisibleNetwork};
 
@@ -109,7 +110,7 @@ mod ios_backend {
             ssid: &Ssid,
             credentials: &Credentials,
             options: &ConnectOptions,
-        ) -> Result<(), Error> {
+        ) -> Result<WifiConnection, Error> {
             // Validate adapter id (we only know about the synthetic en0).
             if adapter.as_str() != IOS_ADAPTER_ID {
                 return Err(Error::AdapterNotFound(adapter.to_string()));
@@ -138,7 +139,8 @@ mod ios_backend {
             let rx = super::configuration::apply_configuration_kickoff(ssid, credentials)?;
 
             match tokio::time::timeout(timeout, rx).await {
-                Ok(received) => super::configuration::map_apply_received(received),
+                Ok(received) => super::configuration::map_apply_received(received)
+                    .map(|()| WifiConnection::inert()),
                 Err(_elapsed) => {
                     // Timed out. Best-effort clean-up; we're already
                     // returning `Error::Timeout`, so any error from the
@@ -156,7 +158,7 @@ mod ios_backend {
             adapter: &AdapterId,
             ssid: &Ssid,
             options: &ConnectOptions,
-        ) -> Result<(), Error> {
+        ) -> Result<WifiConnection, Error> {
             // Validate adapter id (we only know about the synthetic en0).
             if adapter.as_str() != IOS_ADAPTER_ID {
                 return Err(Error::AdapterNotFound(adapter.to_string()));
@@ -193,7 +195,8 @@ mod ios_backend {
             let apply_rx = super::configuration::apply_ssid_only_kickoff(ssid)?;
 
             match tokio::time::timeout(timeout, apply_rx).await {
-                Ok(received) => super::configuration::map_apply_received(received),
+                Ok(received) => super::configuration::map_apply_received(received)
+                    .map(|()| WifiConnection::inert()),
                 Err(_elapsed) => {
                     // Timed out. Best-effort clean-up; we're already
                     // returning `Error::Timeout`, so any error from the

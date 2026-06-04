@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 
 use crate::backend::{AdapterInfo, Backend};
+use crate::connection::WifiConnection;
 use crate::error::Error;
 use crate::types::{AdapterId, ConnectOptions, Credentials, ScanOptions, Ssid, VisibleNetwork};
 
@@ -29,7 +30,7 @@ impl Backend for StubBackend {
         _ssid: &Ssid,
         _credentials: &Credentials,
         _options: &ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         Err(Error::Unsupported(self.reason))
     }
 
@@ -38,7 +39,7 @@ impl Backend for StubBackend {
         _adapter: &AdapterId,
         _ssid: &Ssid,
         _options: &ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         Err(Error::Unsupported(self.reason))
     }
 

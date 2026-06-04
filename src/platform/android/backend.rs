@@ -12,6 +12,7 @@ use jni::objects::JObject;
 use jni::refs::Global;
 
 use crate::backend::{AdapterInfo, Backend};
+use crate::connection::WifiConnection;
 use crate::error::Error;
 use crate::types::{AdapterId, ConnectOptions, Credentials, ScanOptions, Ssid, VisibleNetwork};
 
@@ -155,7 +156,7 @@ impl Backend for AndroidBackend {
         ssid: &Ssid,
         credentials: &Credentials,
         options: &ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         if adapter.as_str() != SYNTHETIC_ADAPTER_ID {
             return Err(Error::AdapterNotFound(adapter.to_string()));
         }
@@ -181,7 +182,7 @@ impl Backend for AndroidBackend {
         adapter: &AdapterId,
         ssid: &Ssid,
         options: &ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         if adapter.as_str() != SYNTHETIC_ADAPTER_ID {
             return Err(Error::AdapterNotFound(adapter.to_string()));
         }
@@ -194,7 +195,7 @@ impl Backend for AndroidBackend {
 
         let ssid_owned = ssid.clone();
         let opts_owned = options.clone();
-        jni_blocking(move || {
+        let connected: Result<(), Error> = jni_blocking(move || {
             let outcome: Result<Result<(), Error>, jni::errors::Error> =
                 jni_min_helper::jni_with_env(|env| {
                     let wm = match super::wifi_manager::wifi_manager(env) {
@@ -233,7 +234,8 @@ impl Backend for AndroidBackend {
                 Err(jni_err) => Err(Error::Os(super::jni_helpers::boxed(jni_err))),
             }
         })
-        .await
+        .await;
+        connected.map(|()| WifiConnection::inert())
     }
 
     async fn disconnect(&self, adapter: &AdapterId, ssid: &Ssid) -> Result<(), Error> {
@@ -378,7 +380,7 @@ impl Backend for AndroidBackend {
         _ssid: &Ssid,
         _credentials: &Credentials,
         _options: &ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         Err(Error::Unsupported(
             "AndroidBackend::connect not implemented",
         ))
@@ -389,7 +391,7 @@ impl Backend for AndroidBackend {
         _adapter: &AdapterId,
         _ssid: &Ssid,
         _options: &ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         Err(Error::Unsupported(
             "AndroidBackend::connect_with_stored_credentials not implemented",
         ))

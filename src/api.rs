@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::backend::{AdapterInfo, Backend};
+use crate::connection::WifiConnection;
 use crate::error::Error;
 use crate::platform;
 use crate::types::{AdapterId, ConnectOptions, Credentials, ScanOptions, Ssid, VisibleNetwork};
@@ -97,12 +98,16 @@ impl WifiAdapter {
     /// - [`Error::AdapterNotFound`] if `self` refers to an adapter that has
     ///   since been removed (USB unplug, hibernation, etc.).
     /// - [`Error::Os`] for any other OS-surfaced failure.
+    ///
+    /// Returns a [`WifiConnection`] guard; on Android, dropping it disconnects
+    /// (the connection is app-scoped). On desktop the guard is inert — use
+    /// [`WifiAdapter::disconnect`].
     pub async fn connect(
         &self,
         ssid: &Ssid,
         credentials: Credentials,
         options: ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         self.backend
             .connect(&self.info.id, ssid, &credentials, &options)
             .await
@@ -124,7 +129,7 @@ impl WifiAdapter {
         &self,
         ssid: &Ssid,
         options: ConnectOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<WifiConnection, Error> {
         self.backend
             .connect_with_stored_credentials(&self.info.id, ssid, &options)
             .await
