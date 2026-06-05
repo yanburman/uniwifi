@@ -97,18 +97,31 @@ pub fn connect_via_specifier(
     let callback = jni_with_env(|env| request_network(env, &ssid_str, password.as_deref()))
         .map_err(|e| Error::Os(boxed(e)))?;
 
-    // Poll for the newly-appeared Wi-Fi network and bind to it. The held
-    // callback keeps the request alive throughout, so there is no teardown race.
+    // Two-phase poll: (1) wait for a new TRANSPORT_WIFI network to appear and
+    // bind the process to it, then (2) wait for DHCP to assign an IPv4 address.
+    // bindProcessToNetwork succeeds at L2 association, but the kernel has no
+    // route yet — TCP to 192.168.1.1 fails with ENETUNREACH until DHCP completes.
+    // We keep a global ref to the bound network so we can call getLinkProperties
+    // on it directly — getActiveNetwork() does not reliably return a
+    // process-bound specifier network on all Android versions.
     let deadline = Instant::now() + timeout;
+    let mut bound_network: Option<Global<JObject<'static>>> = None;
     loop {
-        let bound =
-            jni_with_env(|env| try_bind_new_wifi(env, &before)).map_err(|e| Error::Os(boxed(e)))?;
-        if bound {
-            return Ok(WifiConnection::new(SpecifierGuard { callback }));
+        if bound_network.is_none() {
+            bound_network = jni_with_env(|env| try_bind_new_wifi(env, &before))
+                .map_err(|e| Error::Os(boxed(e)))?;
+            if bound_network.is_some() {
+                log::info!("wifi_specifier: network bound, waiting for DHCP...");
+            }
+        } else if let Some(ref net) = bound_network {
+            let has_ip = jni_with_env(|env| network_has_ipv4(env, net.as_obj()))
+                .map_err(|e| Error::Os(boxed(e)))?;
+            if has_ip {
+                log::info!("wifi_specifier: DHCP complete, IPv4 address assigned");
+                return Ok(WifiConnection::new(SpecifierGuard { callback }));
+            }
         }
         if Instant::now() >= deadline {
-            // Dropping `callback` here would unregister via Global's own drop;
-            // wrap in a guard so the request is released cleanly on timeout too.
             drop(SpecifierGuard { callback });
             return Err(Error::Timeout(timeout));
         }
@@ -200,9 +213,12 @@ fn request_network(
     env.new_global_ref(&callback)
 }
 
-/// Finds a `TRANSPORT_WIFI` network whose handle was not present in `before` and
-/// binds the process to it. Returns `true` once bound.
-fn try_bind_new_wifi(env: &mut Env<'_>, before: &HashSet<i64>) -> Result<bool, jni::errors::Error> {
+/// Finds a `TRANSPORT_WIFI` network whose handle was not present in `before`,
+/// binds the process to it, and returns a global ref to it for later IP checks.
+fn try_bind_new_wifi(
+    env: &mut Env<'_>,
+    before: &HashSet<i64>,
+) -> Result<Option<Global<JObject<'static>>>, jni::errors::Error> {
     let cm = connectivity_manager(env)?;
     let arr_obj = env
         .call_method(
@@ -213,7 +229,7 @@ fn try_bind_new_wifi(env: &mut Env<'_>, before: &HashSet<i64>) -> Result<bool, j
         )?
         .l()?;
     if arr_obj.is_null() {
-        return Ok(false);
+        return Ok(None);
     }
     let arr = JObjectArray::<JObject>::cast_local(env, arr_obj)?;
     let len = arr.len(env)?;
@@ -260,6 +276,60 @@ fn try_bind_new_wifi(env: &mut Env<'_>, before: &HashSet<i64>) -> Result<bool, j
             .z()?;
         log::info!("wifi_specifier: bound process to new wifi network (ok={ok})");
         if ok {
+            let global = env.new_global_ref(&net)?;
+            return Ok(Some(global));
+        }
+    }
+    Ok(None)
+}
+
+/// Returns `true` if `network` has an IPv4 link address — i.e. DHCP has
+/// completed and the kernel has routes for the camera AP subnet.
+fn network_has_ipv4(env: &mut Env<'_>, network: &JObject<'_>) -> Result<bool, jni::errors::Error> {
+    let cm = connectivity_manager(env)?;
+    let lp = env
+        .call_method(
+            &cm,
+            jni_str!("getLinkProperties"),
+            jni_sig!("(Landroid/net/Network;)Landroid/net/LinkProperties;"),
+            &[JValue::Object(network)],
+        )?
+        .l()?;
+    if lp.is_null() {
+        return Ok(false);
+    }
+    let addrs = env
+        .call_method(
+            &lp,
+            jni_str!("getLinkAddresses"),
+            jni_sig!("()Ljava/util/List;"),
+            &[],
+        )?
+        .l()?;
+    if addrs.is_null() {
+        return Ok(false);
+    }
+    let count = env
+        .call_method(&addrs, jni_str!("size"), jni_sig!("()I"), &[])?
+        .i()?;
+    for i in 0..count {
+        let link_addr = env
+            .call_method(
+                &addrs,
+                jni_str!("get"),
+                jni_sig!("(I)Ljava/lang/Object;"),
+                &[JValue::Int(i)],
+            )?
+            .l()?;
+        let inet_addr = env
+            .call_method(
+                &link_addr,
+                jni_str!("getAddress"),
+                jni_sig!("()Ljava/net/InetAddress;"),
+                &[],
+            )?
+            .l()?;
+        if env.is_instance_of(&inet_addr, jni_str!("java/net/Inet4Address"))? {
             return Ok(true);
         }
     }
