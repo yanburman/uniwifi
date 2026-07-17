@@ -5,7 +5,7 @@
 # Each scope still picks its own feature set; cargo unions them at resolve
 # time so there is exactly one tokio crate in the build graph.
 [workspace.dependencies]
-tokio = { version = "1.52.3", default-features = false }
+tokio = { version = "1.52.4", default-features = false }
 
 [package]
 name = "uniwifi"
@@ -44,7 +44,7 @@ multiple_crate_versions = { level = "allow", priority = 1 }
 
 [dependencies]
 async-trait = "0.1.89"
-bitflags = "2.12.1"
+bitflags = "2.13.1"
 thiserror = "2.0.18"
 secrecy = "0.10.3"
 # `sync`: oneshot / Mutex used by backends to bridge OS callbacks to async.
@@ -99,7 +99,7 @@ jni = { version = "0.22.4", default-features = false }
 
 # Logging facade for connect diagnostics (the host app installs a logger,
 # e.g. android_logger). Already in the tree via jni-min-helper.
-log = { version = "0.4.32", default-features = false }
+log = { version = "0.4.33", default-features = false }
 
 # Provides the JavaVM and Context pointers initialized by the host app
 # (or ndk-glue / android-activity, if the consumer uses one).
@@ -108,7 +108,7 @@ ndk-context = "0.1.1"
 # Provides a Java dynamic-proxy-backed BroadcastReceiver implementation
 # usable from pure Rust — saves us shipping a Kotlin/Java helper class
 # alongside the crate.
-jni-min-helper = "0.4.1"
+jni-min-helper = "0.4.3"
 
 [target.'cfg(target_os = "ios")'.dependencies]
 # Objective-C runtime + NSError -> Result sugar. Same tight surface as macOS.
